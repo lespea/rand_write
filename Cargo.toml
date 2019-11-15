@@ -5,6 +5,7 @@ authors = ["Adam Lesperance <lespea@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+anyhow = "1"
 crossbeam = "0.7"
 fs2 = "0.4"
 humantime = "1.3"

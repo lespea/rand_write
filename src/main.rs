@@ -1,8 +1,11 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::str;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Error};
 use crossbeam::thread::scope;
 use fs2;
 use humantime::{format_duration, FormattedDuration};
@@ -19,6 +22,29 @@ struct Opt {
     paths: Vec<PathBuf>,
 }
 
+#[cfg(target_os = "linux")]
+fn freespace(p: &Path) -> u64 {
+    let out = Command::new("blockdev")
+        .arg("--getsize64")
+        .arg(p.as_os_str())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(Error::new)
+        .and_then(|o| String::from_utf8(o.stdout).context(""))
+        .and_then(|o| str::parse::<u64>(o.trim()).context(""));
+
+    out.unwrap_or_else(|_| {
+        fs2::free_space(&p)
+            .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn freespace(path: &Path) -> u64 {
+    fs2::free_space(&p).expect(&format!("Couldn't get the total space for {}", p.display()))
+}
+
 fn to_dur(start: Instant) -> FormattedDuration {
     let el = start.elapsed();
     format_duration(
@@ -33,7 +59,7 @@ fn main() {
         let multi = MultiProgress::new();
 
         for p in opt.paths.into_iter() {
-            let prog_bar = ProgressBar::new(fs2::free_space(&p).expect(&format!("Couldn't get the total space for {}", p.display())));
+            let prog_bar = ProgressBar::new(freespace(&p));
 
             prog_bar.set_style(ProgressStyle::default_bar().template(
                 "[{elapsed_precise}] {bar:40.cyan/blue} {bytes:>7}/{total_bytes:7} => {bytes_per_sec} :: {eta_precise} {msg}",
@@ -44,7 +70,8 @@ fn main() {
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .open(&p).expect(&format!("Couldn't open {}", p.display()));
+                .open(&p)
+                .unwrap_or_else(|_| panic!("Couldn't open {}", p.display()));
 
             prog_bar.set_message(&format!("{}", p.display()));
             s.spawn(move |_| {
@@ -56,7 +83,7 @@ fn main() {
 
                 loop {
                     chacha.fill_bytes(&mut buf);
-                    match fh.write(&mut buf) {
+                    match fh.write(&buf) {
                         Ok(l) => prog_bar.inc(l as u64),
                         Err(e) => {
                             prog_bar.println(&format!("Error writing to {}: {}", p.display(), e));
