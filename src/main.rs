@@ -98,8 +98,7 @@ fn main() {
             s.spawn(move |_| {
                 let start = Instant::now();
 
-                let rng = thread_rng();
-                let mut chacha = rand_chacha::ChaCha12Rng::from_rng(rng).unwrap();
+                let mut chacha = rand_chacha::ChaCha12Rng::from_rng(thread_rng()).unwrap();
 
                 let mut buf = Buf([0u8; 1 << 19]);
 
