@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Error};
 use crossbeam::thread::scope;
-use fs2;
 use humantime::{format_duration, FormattedDuration};
 use indicatif::ProgressBar;
 use indicatif::{MultiProgress, ProgressStyle};
