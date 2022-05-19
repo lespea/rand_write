@@ -6,16 +6,16 @@ use std::str;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Error};
+use clap::Parser;
 use crossbeam::thread::scope;
 use humantime::{format_duration, FormattedDuration};
 use indicatif::ProgressBar;
 use indicatif::{MultiProgress, ProgressStyle};
 use rand::prelude::*;
 use rand::thread_rng;
-use structopt::StructOpt;
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "rand_wipe", about = "Writes random data to specified paths")]
+#[derive(Debug, Parser)]
+#[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
 struct Opt {
     #[structopt(parse(from_os_str))]
     paths: Vec<PathBuf>,
@@ -78,7 +78,7 @@ fn to_dur(start: Instant) -> FormattedDuration {
 struct Buf([u8; 1 << 19]);
 
 fn main() {
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     scope(|s| {
         let multi = MultiProgress::new();
@@ -93,7 +93,7 @@ fn main() {
             ));
             multi.add(prog_bar.clone());
 
-            prog_bar.set_message(&format!("{}", p.display()));
+            prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move |_| {
                 let start = Instant::now();
 

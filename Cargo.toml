@@ -2,19 +2,19 @@
 name = "rand_wipe"
 version = "0.1.0"
 authors = ["Adam Lesperance <lespea@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
-crossbeam = "0.7"
+crossbeam = "0.8"
 fs2 = "0.4"
 humantime = "2.0"
-indicatif = "0.15"
-rand = "0.7"
-rand_chacha = "0.2"
-rand_hc = "0.2"
-rand_isaac = "0.2"
-structopt = { version = "0.3", default-features = false }
+indicatif = "0.16"
+rand = "0.8"
+rand_chacha = "0.3"
+rand_hc = "0.3"
+rand_isaac = "0.3"
+clap = { version = "3", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
