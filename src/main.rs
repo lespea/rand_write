@@ -17,7 +17,6 @@ use rand::thread_rng;
 #[derive(Debug, Parser)]
 #[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
 struct Opt {
-    #[structopt(parse(from_os_str))]
     paths: Vec<PathBuf>,
 }
 
@@ -34,7 +33,7 @@ fn freespace(p: &Path) -> u64 {
         .and_then(|o| str::parse::<u64>(o.trim()).context(""));
 
     out.unwrap_or_else(|_| {
-        fs2::free_space(&p)
+        fs2::free_space(p)
             .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
     })
 }
@@ -53,7 +52,7 @@ fn open(p: &Path) -> File {
         .write(true)
         .truncate(true)
         .custom_flags(libc::O_DIRECT)
-        .open(&p)
+        .open(p)
         .unwrap_or_else(|_| panic!("Couldn't open {}", p.display()))
 }
 
@@ -83,14 +82,16 @@ fn main() {
     scope(|s| {
         let multi = MultiProgress::new();
 
+        let sty = ProgressStyle::default_bar().template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {bytes:>7}/{total_bytes:7} => {bytes_per_sec} :: {eta_precise} {msg}",
+            ).unwrap();
+
         for p in opt.paths.into_iter() {
             let mut fh = open(&p);
 
             let prog_bar = ProgressBar::new(freespace(&p));
 
-            prog_bar.set_style(ProgressStyle::default_bar().template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {bytes:>7}/{total_bytes:7} => {bytes_per_sec} :: {eta_precise} {msg}",
-            ));
+            prog_bar.set_style(sty.clone());
             multi.add(prog_bar.clone());
 
             prog_bar.set_message(format!("{}", p.display()));
@@ -123,8 +124,6 @@ fn main() {
                 prog_bar.finish_and_clear();
             });
         }
-
-        multi.join().unwrap();
     }
     ).unwrap();
 }
