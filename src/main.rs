@@ -108,7 +108,7 @@ fn main() {
                         Ok(l) => prog_bar.inc(l as u64),
                         Err(e) => {
                             if !e.to_string().contains("No space left") {
-                                prog_bar.println(&format!("Error writing to {}: {}", p.display(), e));
+                                prog_bar.println(format!("Error writing to {}: {}", p.display(), e));
                             }
                             break;
                         }
