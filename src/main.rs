@@ -22,18 +22,19 @@ struct Opt {
 
 #[cfg(target_os = "linux")]
 fn freespace(p: &Path) -> u64 {
-    fs2::free_space(p).unwrap_or_else(|_| {
-        Command::new("blockdev")
-            .arg("--getsize64")
-            .arg(p.as_os_str())
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(Error::new)
-            .and_then(|o| String::from_utf8(o.stdout).context(""))
-            .and_then(|o| str::parse::<u64>(o.trim()).context(""))
-            .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
-    })
+    Command::new("blockdev")
+        .arg("--getsize64")
+        .arg(p.as_os_str())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(Error::new)
+        .and_then(|o| String::from_utf8(o.stdout).context(""))
+        .and_then(|o| str::parse::<u64>(o.trim()).context(""))
+        .unwrap_or_else(|_| {
+            fs2::free_space(p)
+                .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
+        })
 }
 
 #[cfg(target_os = "windows")]
