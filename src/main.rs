@@ -88,7 +88,7 @@ fn main() -> Result<()> {
                 "[{elapsed_precise}] {bar:40.cyan/blue} {bytes:>7}/{total_bytes:7} => {bytes_per_sec} :: {eta_precise} {msg}",
             ).unwrap();
 
-        for p in opt.paths.into_iter() {
+        for p in opt.paths {
             let mut fh = open(&p);
 
             let prog_bar = ProgressBar::new(freespace(&p));
@@ -98,12 +98,10 @@ fn main() -> Result<()> {
 
             prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move || {
-                let start = Instant::now();
-
                 let mut chacha = rand_chacha::ChaCha12Rng::from_rng(thread_rng()).unwrap();
-
                 let mut buf = Buf([0u8; 1 << 19]);
 
+                let start = Instant::now();
                 loop {
                     chacha.fill_bytes(&mut buf.0);
                     match fh.write(&buf.0) {
@@ -121,8 +119,7 @@ fn main() -> Result<()> {
                     }
                 }
 
-                prog_bar.println(format!("Finished {} after {}", p.display(), to_dur(start),));
-
+                prog_bar.println(format!("Finished {} after {}", p.display(), to_dur(start)));
                 prog_bar.finish_and_clear();
             });
         }
