@@ -277,24 +277,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand_hc"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b363d4f6370f88d62bf586c80405657bde0f0e1b8945d47d2ad59b906cb4f54"
-dependencies = [
- "rand_core",
-]
-
-[[package]]
-name = "rand_isaac"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac4373cd91b4f55722c553fb0f286edbb81ef3ff6eec7b99d1898a4110a0b28"
-dependencies = [
- "rand_core",
-]
-
-[[package]]
 name = "rand_wipe"
 version = "0.1.0"
 dependencies = [
@@ -306,8 +288,6 @@ dependencies = [
  "libc",
  "rand",
  "rand_chacha",
- "rand_hc",
- "rand_isaac",
 ]
 
 [[package]]
