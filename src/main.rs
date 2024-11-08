@@ -5,14 +5,14 @@ use std::process::{Command, Stdio};
 use std::str;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Error};
+use anyhow::{anyhow, Context, Error, Result};
 use clap::Parser;
-use crossbeam::thread::scope;
 use humantime::{format_duration, FormattedDuration};
 use indicatif::ProgressBar;
 use indicatif::{MultiProgress, ProgressStyle};
 use rand::prelude::*;
 use rand::thread_rng;
+use std::thread::scope;
 
 #[derive(Debug, Parser)]
 #[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
@@ -22,18 +22,16 @@ struct Opt {
 
 #[cfg(target_os = "linux")]
 fn freespace(p: &Path) -> u64 {
-    let out = Command::new("blockdev")
-        .arg("--getsize64")
-        .arg(p.as_os_str())
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(Error::new)
-        .and_then(|o| String::from_utf8(o.stdout).context(""))
-        .and_then(|o| str::parse::<u64>(o.trim()).context(""));
-
-    out.unwrap_or_else(|_| {
-        fs2::free_space(p)
+    fs2::free_space(p).unwrap_or_else(|_| {
+        Command::new("blockdev")
+            .arg("--getsize64")
+            .arg(p.as_os_str())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(Error::new)
+            .and_then(|o| String::from_utf8(o.stdout).context(""))
+            .and_then(|o| str::parse::<u64>(o.trim()).context(""))
             .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
     })
 }
@@ -73,11 +71,15 @@ fn to_dur(start: Instant) -> FormattedDuration {
     )
 }
 
-#[repr(align(512))]
+#[repr(align(8192))]
 struct Buf([u8; 1 << 19]);
 
-fn main() {
+fn main() -> Result<()> {
     let opt = Opt::parse();
+
+    if opt.paths.is_empty() {
+        return Err(anyhow!("Must provide at least one drive to wipe"));
+    }
 
     scope(|s| {
         let multi = MultiProgress::new();
@@ -95,7 +97,7 @@ fn main() {
             multi.add(prog_bar.clone());
 
             prog_bar.set_message(format!("{}", p.display()));
-            s.spawn(move |_| {
+            s.spawn(move || {
                 let start = Instant::now();
 
                 let mut chacha = rand_chacha::ChaCha12Rng::from_rng(thread_rng()).unwrap();
@@ -108,22 +110,23 @@ fn main() {
                         Ok(l) => prog_bar.inc(l as u64),
                         Err(e) => {
                             if !e.to_string().contains("No space left") {
-                                prog_bar.println(format!("Error writing to {}: {}", p.display(), e));
+                                prog_bar.println(format!(
+                                    "Error writing to {}: {}",
+                                    p.display(),
+                                    e
+                                ));
                             }
                             break;
                         }
                     }
                 }
 
-                prog_bar.println(format!(
-                    "Finished {} after {}",
-                    p.display(),
-                    to_dur(start),
-                ));
+                prog_bar.println(format!("Finished {} after {}", p.display(), to_dur(start),));
 
                 prog_bar.finish_and_clear();
             });
         }
-    }
-    ).unwrap();
+    });
+
+    Ok(())
 }

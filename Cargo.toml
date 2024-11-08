@@ -6,7 +6,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-crossbeam = "0.8"
 fs2 = "0.4"
 humantime = "2.0"
 indicatif = "0.17"
