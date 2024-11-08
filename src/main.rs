@@ -71,7 +71,7 @@ fn to_dur(start: Instant) -> FormattedDuration {
     )
 }
 
-const BUF_SIZE: usize = 2 << 20;
+const BUF_SIZE: usize = 1 << 20;
 
 #[derive(Clone, Copy)]
 #[repr(align(8192))]
