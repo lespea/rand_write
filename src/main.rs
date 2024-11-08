@@ -11,7 +11,6 @@ use humantime::{format_duration, FormattedDuration};
 use indicatif::ProgressBar;
 use indicatif::{MultiProgress, ProgressStyle};
 use rand::prelude::*;
-use rand::thread_rng;
 use std::thread::scope;
 
 #[derive(Debug, Parser)]
@@ -109,7 +108,7 @@ fn main() -> Result<()> {
 
             prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move || {
-                let mut chacha = rand_chacha::ChaCha12Rng::from_rng(thread_rng()).unwrap();
+                let mut chacha = rand_chacha::ChaCha12Rng::from_entropy();
                 let mut buf = Buf::new();
 
                 let start = Instant::now();
