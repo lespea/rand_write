@@ -2,20 +2,19 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::str;
+use std::thread::scope;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{Context, Error, Result};
 use clap::Parser;
 use humantime::{format_duration, FormattedDuration};
-use indicatif::ProgressBar;
-use indicatif::{MultiProgress, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::prelude::*;
-use std::thread::scope;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
 struct Opt {
+    #[arg(required = true)]
     paths: Vec<PathBuf>,
 }
 
@@ -29,39 +28,36 @@ fn freespace(p: &Path) -> u64 {
         .output()
         .map_err(Error::new)
         .and_then(|o| String::from_utf8(o.stdout).context(""))
-        .and_then(|o| str::parse::<u64>(o.trim()).context(""))
-        .unwrap_or_else(|_| {
-            fs2::free_space(p)
-                .unwrap_or_else(|_| panic!("Couldn't get the total space for {}", p.display()))
+        .and_then(|o| {
+            o.trim()
+                .parse()
+                .context(format!("Invalid disk size number? {o}"))
+        })
+        .unwrap_or_else(|err| {
+            println!("Error getting size the standard way; falling back to fs2 ({err})");
+            fs2::free_space(p).unwrap_or_else(|err| {
+                panic!("Couldn't get the total space for {} ({err})", p.display())
+            })
         })
 }
 
 #[cfg(target_os = "windows")]
-fn freespace(path: &Path) -> u64 {
-    fs2::free_space(&p).expect(&format!("Couldn't get the total space for {}", p.display()))
+fn freespace(p: &Path) -> u64 {
+    fs2::free_space(p).expect(&format!("Couldn't get the total space for {}", p.display()))
 }
 
-#[cfg(target_os = "linux")]
 fn open(p: &Path) -> File {
-    use std::os::unix::fs::OpenOptionsExt;
+    let mut opt = OpenOptions::new();
+    opt.create(true).write(true).truncate(true);
 
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(p)
-        .unwrap_or_else(|_| panic!("Couldn't open {}", p.display()))
-}
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opt.custom_flags(libc::O_DIRECT);
+    }
 
-#[cfg(target_os = "windows")]
-fn open(path: &Path) -> File {
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&p)
-        .unwrap_or_else(|_| panic!("Couldn't open {}", p.display()))
+    opt.open(p)
+        .unwrap_or_else(|err| panic!("Couldn't open {} ({err})", p.display()))
 }
 
 fn to_dur(start: Instant) -> FormattedDuration {
@@ -73,7 +69,6 @@ fn to_dur(start: Instant) -> FormattedDuration {
 
 const BUF_SIZE: usize = 1 << 20;
 
-#[derive(Clone, Copy)]
 #[repr(align(8192))]
 struct Buf([u8; BUF_SIZE]);
 
@@ -86,10 +81,6 @@ impl Buf {
 
 fn main() -> Result<()> {
     let opt = Opt::parse();
-
-    if opt.paths.is_empty() {
-        return Err(anyhow!("Must provide at least one drive to wipe"));
-    }
 
     scope(|s| {
         let multi = MultiProgress::new();
@@ -108,10 +99,10 @@ fn main() -> Result<()> {
 
             prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move || {
-                let mut chacha = rand_chacha::ChaCha12Rng::from_entropy();
-                let mut buf = Buf::new();
-
                 let start = Instant::now();
+                let mut chacha = rand_chacha::ChaCha12Rng::from_entropy();
+
+                let mut buf = Buf::new();
                 loop {
                     chacha.fill_bytes(&mut buf.0);
                     match fh.write(&buf.0) {
