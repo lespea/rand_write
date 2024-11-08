@@ -71,8 +71,18 @@ fn to_dur(start: Instant) -> FormattedDuration {
     )
 }
 
+const BUF_SIZE: usize = 2 << 20;
+
+#[derive(Clone, Copy)]
 #[repr(align(8192))]
-struct Buf([u8; 1 << 19]);
+struct Buf([u8; BUF_SIZE]);
+
+impl Buf {
+    #[inline]
+    fn new() -> Self {
+        Buf([0u8; BUF_SIZE])
+    }
+}
 
 fn main() -> Result<()> {
     let opt = Opt::parse();
@@ -99,7 +109,7 @@ fn main() -> Result<()> {
             prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move || {
                 let mut chacha = rand_chacha::ChaCha12Rng::from_rng(thread_rng()).unwrap();
-                let mut buf = Buf([0u8; 1 << 19]);
+                let mut buf = Buf::new();
 
                 let start = Instant::now();
                 loop {
