@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Error, Result};
 use clap::Parser;
-use humantime::{format_duration, FormattedDuration};
+use humantime::{FormattedDuration, format_duration};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::prelude::*;
 
