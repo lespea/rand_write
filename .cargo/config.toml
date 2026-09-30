@@ -1,11 +1,11 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = [
     "-Ctarget-feature=+crt-static",
-    "-Clink-args=-s /DEBUG:NONE",
+    "-Clink-arg=/DEBUG:NONE",
     "-Cdebuginfo=0"
 ]
 
-[target.'cfg(all())']
+[target.'cfg(not(target_os = "macos"))']
 rustflags = [
     "-Ctarget-cpu=native",
 ]
