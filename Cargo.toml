@@ -9,8 +9,8 @@ anyhow = "1"
 fs2 = "0.4"
 humantime = "2.0"
 indicatif = "0.17"
-rand = "0.9"
-rand_chacha = "0.9"
+rand = "0.10"
+rand_chacha = "0.10"
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]

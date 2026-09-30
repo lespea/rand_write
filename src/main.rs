@@ -100,7 +100,8 @@ fn main() -> Result<()> {
             prog_bar.set_message(format!("{}", p.display()));
             s.spawn(move || {
                 let start = Instant::now();
-                let mut chacha = rand_chacha::ChaCha12Rng::from_os_rng();
+                let mut chacha = rand_chacha::ChaCha12Rng::try_from_rng(&mut rand::rngs::SysRng)
+                    .expect("failed to seed RNG from OS");
 
                 let mut buf = Buf::new();
                 loop {
