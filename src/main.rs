@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::scope;
@@ -48,7 +48,7 @@ fn freespace(p: &Path) -> u64 {
 
 fn open(p: &Path) -> File {
     let mut opt = OpenOptions::new();
-    opt.create(true).write(true).truncate(true);
+    opt.write(true).truncate(true);
 
     #[cfg(target_os = "linux")]
     {
@@ -74,8 +74,9 @@ struct Buf([u8; BUF_SIZE]);
 
 impl Buf {
     #[inline]
-    fn new() -> Self {
-        Buf([0u8; BUF_SIZE])
+    fn new() -> Box<Self> {
+        // SAFETY: all-zero bytes are a valid `[u8; N]`
+        unsafe { Box::new_zeroed().assume_init() }
     }
 }
 
@@ -108,8 +109,9 @@ fn main() -> Result<()> {
                     chacha.fill_bytes(&mut buf.0);
                     match fh.write(&buf.0) {
                         Ok(l) => prog_bar.inc(l as u64),
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                         Err(e) => {
-                            if !e.to_string().contains("No space left") {
+                            if e.kind() != ErrorKind::StorageFull {
                                 prog_bar.println(format!(
                                     "Error writing to {}: {}",
                                     p.display(),
@@ -119,6 +121,10 @@ fn main() -> Result<()> {
                             break;
                         }
                     }
+                }
+
+                if let Err(e) = fh.sync_all() {
+                    prog_bar.println(format!("Error syncing {}: {}", p.display(), e));
                 }
 
                 prog_bar.println(format!("Finished {} after {}", p.display(), to_dur(start)));
