@@ -221,7 +221,6 @@ struct Buf([u8; BUF_SIZE]);
 const _: () = assert!(BUF_SIZE.is_multiple_of(align_of::<Buf>()));
 
 impl Buf {
-    #[inline]
     fn new() -> Box<Self> {
         // SAFETY: all-zero bytes are a valid `[u8; N]`
         unsafe { Box::new_zeroed().assume_init() }
