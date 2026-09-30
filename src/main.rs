@@ -1,6 +1,6 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, ErrorKind, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::sync_channel;
 use std::thread::scope;
 use std::time::{Duration, Instant};
@@ -11,6 +11,10 @@ use humantime::{FormattedDuration, format_duration};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
+
+mod platform;
+
+use platform::{device_size, free_space, is_device, open};
 
 #[derive(Parser)]
 #[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
@@ -26,325 +30,6 @@ struct Opt {
     /// Devices to overwrite entirely, or files to fill their filesystem's free space with
     #[arg(required = true)]
     paths: Vec<PathBuf>,
-}
-
-/// Whether the path names a disk rather than a (possibly not yet existing) regular file
-#[cfg(unix)]
-fn is_device(p: &Path) -> Result<bool> {
-    use std::os::unix::fs::FileTypeExt;
-
-    match std::fs::metadata(p) {
-        Ok(m) => {
-            let ft = m.file_type();
-            Ok(ft.is_block_device() || ft.is_char_device())
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("couldn't stat {}", p.display())),
-    }
-}
-
-/// Whether the path names a disk rather than a (possibly not yet existing) regular file
-#[cfg(windows)]
-fn is_device(p: &Path) -> Result<bool> {
-    Ok(p.as_os_str().to_string_lossy().starts_with(r"\\.\"))
-}
-
-#[cfg(target_os = "linux")]
-const IN_USE_HINT: &str =
-    "unmount it and its partitions, and stop anything else holding it (swap, LVM, dm-crypt, RAID)";
-#[cfg(target_os = "macos")]
-const IN_USE_HINT: &str = "unmount it first with `diskutil unmountDisk`";
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-const IN_USE_HINT: &str = "unmount it first";
-
-/// Opens with `uncached`, falling back to `opt` when the target rejects it with `invalid`
-#[cfg(any(target_os = "linux", windows))]
-fn open_fallback(
-    uncached: &OpenOptions,
-    opt: &OpenOptions,
-    p: &Path,
-    invalid: i32,
-    what: &str,
-) -> std::io::Result<File> {
-    match uncached.open(p) {
-        Err(e) if e.raw_os_error() == Some(invalid) => {
-            println!(
-                "{} doesn't support {what}; falling back to buffered writes",
-                p.display()
-            );
-            opt.open(p)
-        }
-        res => res,
-    }
-}
-
-/// Opens a target bypassing the page cache where possible. Devices must already exist and not be
-/// in use; files are created if missing.
-fn open(p: &Path, device: bool) -> Result<File> {
-    let mut opt = OpenOptions::new();
-    opt.write(true).create(!device);
-
-    #[cfg(target_os = "linux")]
-    let res = {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // On a block device O_EXCL fails with EBUSY while it or any of its partitions is mounted
-        // or otherwise claimed
-        let excl = if device { libc::O_EXCL } else { 0 };
-        opt.custom_flags(excl);
-        open_fallback(
-            opt.clone().custom_flags(excl | libc::O_DIRECT),
-            &opt,
-            p,
-            libc::EINVAL,
-            "O_DIRECT",
-        )
-    };
-
-    #[cfg(windows)]
-    let res = {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH,
-        };
-
-        // IOCTL_DISK_GET_LENGTH_INFO needs read access
-        opt.read(true);
-        open_fallback(
-            opt.clone()
-                .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH),
-            &opt,
-            p,
-            ERROR_INVALID_PARAMETER as i32,
-            "unbuffered I/O",
-        )
-    };
-
-    #[cfg(not(any(target_os = "linux", windows)))]
-    let res = opt.open(p);
-
-    let fh = match res {
-        #[cfg(unix)]
-        Err(e) if device && e.raw_os_error() == Some(libc::EBUSY) => {
-            bail!("{} is in use; {IN_USE_HINT}", p.display())
-        }
-        res => res.with_context(|| format!("couldn't open {}", p.display()))?,
-    };
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-
-        // SAFETY: plain fcntl on a descriptor we own
-        if unsafe { libc::fcntl(fh.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
-            println!(
-                "{} doesn't support F_NOCACHE; falling back to buffered writes ({})",
-                p.display(),
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    if device {
-        check_no_volumes(&fh, p)?;
-    }
-
-    Ok(fh)
-}
-
-/// DeviceIoControl with no input and a fixed-size output
-#[cfg(windows)]
-fn ioctl_out<T>(fh: &File, code: u32, out: &mut T) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::IO::DeviceIoControl;
-
-    let mut returned = 0;
-    // SAFETY: `out` is a writable T of the size passed in
-    let ok = unsafe {
-        DeviceIoControl(
-            fh.as_raw_handle(),
-            code,
-            std::ptr::null(),
-            0,
-            (out as *mut T).cast(),
-            size_of::<T>() as u32,
-            &mut returned,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Windows blocks writes to any sector a mounted volume owns, so only whole disks with no volumes
-/// left on them can be wiped
-#[cfg(windows)]
-fn check_no_volumes(fh: &File, p: &Path) -> Result<()> {
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
-    };
-    use windows_sys::Win32::System::Ioctl::{
-        IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER,
-    };
-
-    let mut num = STORAGE_DEVICE_NUMBER::default();
-    ioctl_out(fh, IOCTL_STORAGE_GET_DEVICE_NUMBER, &mut num)
-        .with_context(|| format!("couldn't get the disk number of {}", p.display()))?;
-    if num.PartitionNumber != 0 {
-        bail!(
-            r"{} is a partition or volume; target the whole disk (\\.\PhysicalDriveN) instead",
-            p.display()
-        );
-    }
-
-    let mut on_disk = vec![];
-    let mut name = [0u16; 261];
-    // SAFETY: the length passed matches `name`
-    let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
-    if find == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error()).context("couldn't list volumes");
-    }
-    loop {
-        let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-        let vol = String::from_utf16_lossy(&name[..len]);
-        if volume_disks(&vol).is_ok_and(|disks| disks.contains(&num.DeviceNumber)) {
-            on_disk.push(vol);
-        }
-        // SAFETY: as above; fails with ERROR_NO_MORE_FILES after the last volume
-        if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } == 0 {
-            break;
-        }
-    }
-    // SAFETY: `find` came from FindFirstVolumeW and isn't used afterwards
-    unsafe { FindVolumeClose(find) };
-
-    if !on_disk.is_empty() {
-        bail!(
-            "{} still has volumes on it ({}); take it offline or `clean` it in diskpart first",
-            p.display(),
-            on_disk.join(", ")
-        );
-    }
-    Ok(())
-}
-
-/// Disk numbers a volume (`\\?\Volume{...}\`) lives on
-#[cfg(windows)]
-fn volume_disks(vol: &str) -> std::io::Result<Vec<u32>> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS;
-    use windows_sys::Win32::System::Ioctl::DISK_EXTENT;
-
-    // VOLUME_DISK_EXTENTS with room for volumes spanning several disks
-    #[repr(C)]
-    struct Extents {
-        count: u32,
-        extents: [DISK_EXTENT; 32],
-    }
-
-    // The volume device is the name without its trailing backslash, and querying it needs no
-    // access rights
-    let fh = OpenOptions::new()
-        .access_mode(0)
-        .open(vol.trim_end_matches('\\'))?;
-    // SAFETY: all-zero is a valid `Extents`
-    let mut ext: Extents = unsafe { std::mem::zeroed() };
-    ioctl_out(&fh, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &mut ext)?;
-    let count = (ext.count as usize).min(ext.extents.len());
-    Ok(ext.extents[..count].iter().map(|e| e.DiskNumber).collect())
-}
-
-/// Exact size of a disk
-#[cfg(not(any(target_os = "macos", windows)))]
-fn device_size(fh: &mut File) -> std::io::Result<u64> {
-    use std::io::{Seek, SeekFrom};
-
-    let size = fh.seek(SeekFrom::End(0))?;
-    fh.rewind()?;
-    Ok(size)
-}
-
-/// Exact size of a disk
-#[cfg(target_os = "macos")]
-fn device_size(fh: &mut File) -> std::io::Result<u64> {
-    use std::os::fd::AsRawFd;
-
-    // _IOR('d', 24, uint32_t) and _IOR('d', 25, uint64_t) from <sys/disk.h>
-    const DKIOCGETBLOCKSIZE: libc::c_ulong = 0x4004_6418;
-    const DKIOCGETBLOCKCOUNT: libc::c_ulong = 0x4008_6419;
-
-    let fd = fh.as_raw_fd();
-    let (mut block_size, mut block_count) = (0u32, 0u64);
-    // SAFETY: each ioctl writes a single value of the pointed-to type
-    unsafe {
-        if libc::ioctl(fd, DKIOCGETBLOCKSIZE, &raw mut block_size) == -1
-            || libc::ioctl(fd, DKIOCGETBLOCKCOUNT, &raw mut block_count) == -1
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(u64::from(block_size) * block_count)
-}
-
-/// Exact size of a disk
-#[cfg(windows)]
-fn device_size(fh: &mut File) -> std::io::Result<u64> {
-    use windows_sys::Win32::System::Ioctl::{GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO};
-
-    let mut info = GET_LENGTH_INFORMATION::default();
-    ioctl_out(fh, IOCTL_DISK_GET_LENGTH_INFO, &mut info)?;
-    Ok(info.Length as u64)
-}
-
-/// Space left for a regular file to grow into
-#[cfg(unix)]
-fn free_space(fh: &File, _p: &Path) -> std::io::Result<u64> {
-    use std::os::fd::AsRawFd;
-
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: fstatvfs fills in the whole struct on success
-    let st = unsafe {
-        if libc::fstatvfs(fh.as_raw_fd(), st.as_mut_ptr()) == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        st.assume_init()
-    };
-    // Field widths differ between Linux and macOS
-    #[allow(clippy::useless_conversion)]
-    Ok(u64::from(st.f_bavail) * u64::from(st.f_frsize))
-}
-
-/// Space left for a regular file to grow into
-#[cfg(windows)]
-fn free_space(_fh: &File, p: &Path) -> std::io::Result<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
-    // It wants a directory, not the file itself
-    let dir = match p.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
-    let mut avail = 0;
-    // SAFETY: `wide` is NUL-terminated and the unused outputs may be null
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut avail,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(avail)
 }
 
 fn is_yes(answer: &str) -> bool {
@@ -578,6 +263,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// A path in the temp dir that's removed on drop
@@ -605,19 +292,6 @@ mod tests {
     fn regular_files_are_not_devices() {
         assert!(!is_device(&TempFile::new("device").0).unwrap());
         assert!(!is_device(&TempFile::missing("device-missing").0).unwrap());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn device_nodes_are_devices() {
-        assert!(is_device(Path::new("/dev/null")).unwrap());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn device_paths_are_devices() {
-        assert!(is_device(Path::new(r"\\.\PhysicalDrive0")).unwrap());
-        assert!(!is_device(Path::new(r"C:\wipe.bin")).unwrap());
     }
 
     #[test]
