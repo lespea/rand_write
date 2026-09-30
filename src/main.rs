@@ -217,11 +217,25 @@ const NUM_BUFS: usize = 4;
 #[cfg_attr(not(target_os = "macos"), repr(align(4096)))]
 struct Buf([u8; BUF_SIZE]);
 
+// Every full write must stay a multiple of the alignment
+const _: () = assert!(BUF_SIZE.is_multiple_of(align_of::<Buf>()));
+
 impl Buf {
     #[inline]
     fn new() -> Box<Self> {
         // SAFETY: all-zero bytes are a valid `[u8; N]`
         unsafe { Box::new_zeroed().assume_init() }
+    }
+}
+
+/// How much of the next buffer to write: devices stop at exactly their size, files write whole
+/// buffers until the disk fills up. Device sizes are sector multiples, so a trimmed last chunk
+/// stays aligned.
+fn chunk_len(is_device: bool, left: u64) -> usize {
+    if is_device {
+        left.min(BUF_SIZE as u64) as usize
+    } else {
+        BUF_SIZE
     }
 }
 
@@ -309,12 +323,7 @@ fn main() -> Result<()> {
                 let mut left = size;
 
                 'outer: for buf in full_rx.iter() {
-                    // Device sizes are sector multiples, so a trimmed last chunk stays aligned
-                    let len = if is_device {
-                        left.min(BUF_SIZE as u64) as usize
-                    } else {
-                        BUF_SIZE
-                    };
+                    let len = chunk_len(is_device, left);
                     if len == 0 {
                         break;
                     }
@@ -357,4 +366,82 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file in the temp dir that's removed on drop
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("rand_wipe-{}-{name}", std::process::id()));
+            File::create(&path).expect("create temp file");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn regular_file_is_not_a_device() {
+        let tmp = TempFile::new("device");
+        let mut fh = open(&tmp.0).unwrap();
+        assert_eq!(device_size(&mut fh).unwrap(), None);
+    }
+
+    #[test]
+    fn free_space_is_reported() {
+        let tmp = TempFile::new("free");
+        let fh = open(&tmp.0).unwrap();
+        assert!(free_space(&fh, &tmp.0).unwrap() > 0);
+    }
+
+    #[test]
+    fn free_space_of_bare_file_name() {
+        // No parent directory, so Windows has to fall back to "."
+        let name = format!("rand_wipe-{}-bare", std::process::id());
+        let tmp = TempFile::new("bare");
+        let fh = open(&tmp.0).unwrap();
+        assert!(free_space(&fh, Path::new(&name)).unwrap() > 0);
+    }
+
+    #[test]
+    fn aligned_write_is_accepted() {
+        let tmp = TempFile::new("write");
+        let mut fh = open(&tmp.0).unwrap();
+        let buf = Buf::new();
+        assert_eq!(fh.write(&buf.0).unwrap(), BUF_SIZE);
+        fh.sync_all().unwrap();
+        assert_eq!(fh.metadata().unwrap().len(), BUF_SIZE as u64);
+    }
+
+    #[test]
+    fn device_writes_stop_at_its_size() {
+        let size = 2 * BUF_SIZE as u64 + 512 * 3;
+        let mut left = size;
+        let mut chunks = vec![];
+        loop {
+            let len = chunk_len(true, left);
+            if len == 0 {
+                break;
+            }
+            chunks.push(len);
+            left -= len as u64;
+        }
+        assert_eq!(chunks, [BUF_SIZE, BUF_SIZE, 512 * 3]);
+    }
+
+    #[test]
+    fn file_writes_are_always_full_buffers() {
+        assert_eq!(chunk_len(false, 0), BUF_SIZE);
+        assert_eq!(chunk_len(false, 512), BUF_SIZE);
+    }
 }
