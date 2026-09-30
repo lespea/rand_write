@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::sync_channel;
 use std::thread::scope;
 use std::time::{Duration, Instant};
 
@@ -84,7 +85,10 @@ fn to_dur(start: Instant) -> FormattedDuration {
     )
 }
 
-const BUF_SIZE: usize = 1 << 20;
+// Larger O_DIRECT writes get split into more concurrent requests, i.e. a deeper effective queue
+const BUF_SIZE: usize = 4 << 20;
+// Buffers cycling between the RNG thread and the writer thread
+const NUM_BUFS: usize = 4;
 
 #[repr(align(8192))]
 struct Buf([u8; BUF_SIZE]);
@@ -142,27 +146,52 @@ fn main() -> Result<()> {
             prog_bar.set_style(sty.clone());
             prog_bar.set_message(format!("{}", p.display()));
 
+            // Buffers go empty -> RNG thread -> full -> writer thread -> empty, so filling
+            // overlaps with writing. When the writer stops, both channels hang up and the
+            // RNG thread exits on its own.
+            let (empty_tx, empty_rx) = sync_channel::<Box<Buf>>(NUM_BUFS);
+            let (full_tx, full_rx) = sync_channel::<Box<Buf>>(NUM_BUFS);
+            for _ in 0..NUM_BUFS {
+                empty_tx.send(Buf::new()).expect("receiver is alive");
+            }
+
+            s.spawn(move || {
+                for mut buf in empty_rx {
+                    rng.fill_bytes(&mut buf.0);
+                    if full_tx.send(buf).is_err() {
+                        break;
+                    }
+                }
+            });
+
             s.spawn(move || {
                 let start = Instant::now();
 
-                let mut buf = Buf::new();
-                loop {
-                    rng.fill_bytes(&mut buf.0);
-                    match fh.write(&buf.0) {
-                        Ok(l) => prog_bar.inc(l as u64),
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            if e.kind() != ErrorKind::StorageFull {
-                                prog_bar.println(format!(
-                                    "Error writing to {}: {}",
-                                    p.display(),
-                                    e
-                                ));
+                'outer: for buf in full_rx.iter() {
+                    loop {
+                        match fh.write(&buf.0) {
+                            Ok(l) => {
+                                prog_bar.inc(l as u64);
+                                break;
                             }
-                            break;
+                            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                            Err(e) => {
+                                if e.kind() != ErrorKind::StorageFull {
+                                    prog_bar.println(format!(
+                                        "Error writing to {}: {}",
+                                        p.display(),
+                                        e
+                                    ));
+                                }
+                                break 'outer;
+                            }
                         }
                     }
+                    if empty_tx.send(buf).is_err() {
+                        break;
+                    }
                 }
+                drop(empty_tx);
 
                 if let Err(e) = fh.sync_all() {
                     prog_bar.println(format!("Error syncing {}: {}", p.display(), e));
