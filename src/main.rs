@@ -19,47 +19,9 @@ struct Opt {
     paths: Vec<PathBuf>,
 }
 
-#[cfg(target_os = "linux")]
-fn blockdev_size(p: &Path) -> Result<u64> {
-    use std::process::{Command, Stdio};
-
-    let out = Command::new("blockdev")
-        .arg("--getsize64")
-        .arg(p.as_os_str())
-        .stdin(Stdio::null())
-        .output()
-        .context("couldn't run blockdev")?;
-
-    if !out.status.success() {
-        anyhow::bail!(
-            "blockdev failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    let size = String::from_utf8(out.stdout).context("blockdev output isn't UTF-8")?;
-    let size = size.trim();
-    size.parse()
-        .with_context(|| format!("invalid disk size from blockdev: {size:?}"))
-}
-
-fn freespace(p: &Path) -> Result<u64> {
-    #[cfg(target_os = "linux")]
-    match blockdev_size(p) {
-        Ok(size) => return Ok(size),
-        Err(err) => println!(
-            "Couldn't get the device size of {}; falling back to fs2 ({err:#})",
-            p.display()
-        ),
-    }
-
-    fs2::free_space(p).with_context(|| format!("couldn't get the total space for {}", p.display()))
-}
-
 fn open(p: &Path) -> Result<File> {
     let mut opt = OpenOptions::new();
-    opt.write(true).truncate(true);
+    opt.write(true);
 
     #[cfg(target_os = "linux")]
     {
@@ -74,8 +36,167 @@ fn open(p: &Path) -> Result<File> {
         }
     }
 
-    opt.open(p)
-        .with_context(|| format!("couldn't open {}", p.display()))
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH,
+        };
+
+        // IOCTL_DISK_GET_LENGTH_INFO needs read access
+        opt.read(true);
+        match opt
+            .clone()
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)
+            .open(p)
+        {
+            Err(e) if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => println!(
+                "{} doesn't support unbuffered I/O; falling back to buffered writes",
+                p.display()
+            ),
+            res => return res.with_context(|| format!("couldn't open {}", p.display())),
+        }
+    }
+
+    let fh = opt
+        .open(p)
+        .with_context(|| format!("couldn't open {}", p.display()))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+
+        // SAFETY: plain fcntl on a descriptor we own
+        if unsafe { libc::fcntl(fh.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
+            println!(
+                "{} doesn't support F_NOCACHE; falling back to buffered writes ({})",
+                p.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    Ok(fh)
+}
+
+/// Exact size of a block/raw device, or `None` for a regular file
+#[cfg(target_os = "linux")]
+fn device_size(fh: &mut File) -> std::io::Result<Option<u64>> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::FileTypeExt;
+
+    if !fh.metadata()?.file_type().is_block_device() {
+        return Ok(None);
+    }
+    let size = fh.seek(SeekFrom::End(0))?;
+    fh.rewind()?;
+    Ok(Some(size))
+}
+
+/// Exact size of a block/raw device, or `None` for a regular file
+#[cfg(target_os = "macos")]
+fn device_size(fh: &mut File) -> std::io::Result<Option<u64>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileTypeExt;
+
+    // _IOR('d', 24, uint32_t) and _IOR('d', 25, uint64_t) from <sys/disk.h>
+    const DKIOCGETBLOCKSIZE: libc::c_ulong = 0x4004_6418;
+    const DKIOCGETBLOCKCOUNT: libc::c_ulong = 0x4008_6419;
+
+    let ft = fh.metadata()?.file_type();
+    if !(ft.is_block_device() || ft.is_char_device()) {
+        return Ok(None);
+    }
+
+    let fd = fh.as_raw_fd();
+    let (mut block_size, mut block_count) = (0u32, 0u64);
+    // SAFETY: each ioctl writes a single value of the pointed-to type
+    unsafe {
+        if libc::ioctl(fd, DKIOCGETBLOCKSIZE, &raw mut block_size) == -1
+            || libc::ioctl(fd, DKIOCGETBLOCKCOUNT, &raw mut block_count) == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(Some(u64::from(block_size) * block_count))
+}
+
+/// Exact size of a disk/volume, or `None` for a regular file
+#[cfg(windows)]
+fn device_size(fh: &mut File) -> std::io::Result<Option<u64>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::{GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO};
+
+    let mut info = GET_LENGTH_INFORMATION::default();
+    let mut returned = 0;
+    // SAFETY: the output buffer is a GET_LENGTH_INFORMATION of the size passed in
+    let ok = unsafe {
+        DeviceIoControl(
+            fh.as_raw_handle(),
+            IOCTL_DISK_GET_LENGTH_INFO,
+            std::ptr::null(),
+            0,
+            (&raw mut info).cast(),
+            size_of::<GET_LENGTH_INFORMATION>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    // Regular files don't answer disk ioctls
+    Ok((ok != 0).then_some(info.Length as u64))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn device_size(_fh: &mut File) -> std::io::Result<Option<u64>> {
+    Ok(None)
+}
+
+/// Space left for a regular file to grow into
+#[cfg(unix)]
+fn free_space(fh: &File, _p: &Path) -> std::io::Result<u64> {
+    use std::os::fd::AsRawFd;
+
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: fstatvfs fills in the whole struct on success
+    let st = unsafe {
+        if libc::fstatvfs(fh.as_raw_fd(), st.as_mut_ptr()) == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        st.assume_init()
+    };
+    // Field widths differ between Linux and macOS
+    #[allow(clippy::useless_conversion)]
+    Ok(u64::from(st.f_bavail) * u64::from(st.f_frsize))
+}
+
+/// Space left for a regular file to grow into
+#[cfg(windows)]
+fn free_space(_fh: &File, p: &Path) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // It wants a directory, not the file itself
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut avail = 0;
+    // SAFETY: `wide` is NUL-terminated and the unused outputs may be null
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut avail,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(avail)
 }
 
 fn to_dur(start: Instant) -> FormattedDuration {
@@ -90,7 +211,10 @@ const BUF_SIZE: usize = 4 << 20;
 // Buffers cycling between the RNG thread and the writer thread
 const NUM_BUFS: usize = 4;
 
-#[repr(align(8192))]
+// O_DIRECT and FILE_FLAG_NO_BUFFERING need at most 4K; F_NOCACHE wants page alignment,
+// which is 16K on Apple Silicon
+#[cfg_attr(target_os = "macos", repr(align(16384)))]
+#[cfg_attr(not(target_os = "macos"), repr(align(4096)))]
 struct Buf([u8; BUF_SIZE]);
 
 impl Buf {
@@ -105,6 +229,8 @@ struct Target {
     path: PathBuf,
     fh: File,
     size: u64,
+    // Devices get written to exactly their size; files until the disk is full
+    is_device: bool,
     rng: ChaCha8Rng,
 }
 
@@ -116,14 +242,27 @@ fn main() -> Result<()> {
         .paths
         .into_iter()
         .map(|path| {
-            let fh = open(&path)?;
-            let size = freespace(&path)?;
+            let mut fh = open(&path)?;
+            let (size, is_device) = match device_size(&mut fh)
+                .with_context(|| format!("couldn't get the size of {}", path.display()))?
+            {
+                Some(size) => (size, true),
+                None => {
+                    fh.set_len(0)
+                        .with_context(|| format!("couldn't truncate {}", path.display()))?;
+                    let free = free_space(&fh, &path).with_context(|| {
+                        format!("couldn't get the free space for {}", path.display())
+                    })?;
+                    (free, false)
+                }
+            };
             let rng = ChaCha8Rng::try_from_rng(&mut rand::rngs::SysRng)
                 .context("failed to seed RNG from OS")?;
             Ok(Target {
                 path,
                 fh,
                 size,
+                is_device,
                 rng,
             })
         })
@@ -139,6 +278,7 @@ fn main() -> Result<()> {
             path: p,
             mut fh,
             size,
+            is_device,
             mut rng,
         } in targets
         {
@@ -166,12 +306,25 @@ fn main() -> Result<()> {
 
             s.spawn(move || {
                 let start = Instant::now();
+                let mut left = size;
 
                 'outer: for buf in full_rx.iter() {
+                    // Device sizes are sector multiples, so a trimmed last chunk stays aligned
+                    let len = if is_device {
+                        left.min(BUF_SIZE as u64) as usize
+                    } else {
+                        BUF_SIZE
+                    };
+                    if len == 0 {
+                        break;
+                    }
+
                     loop {
-                        match fh.write(&buf.0) {
+                        match fh.write(&buf.0[..len]) {
+                            Ok(0) => break 'outer,
                             Ok(l) => {
                                 prog_bar.inc(l as u64);
+                                left = left.saturating_sub(l as u64);
                                 break;
                             }
                             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
