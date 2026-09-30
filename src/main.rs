@@ -10,7 +10,7 @@ use clap::Parser;
 use humantime::{FormattedDuration, format_duration};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::prelude::*;
-use rand_chacha::ChaCha12Rng;
+use rand_chacha::ChaCha8Rng;
 
 #[derive(Parser)]
 #[clap(name = "rand_wipe", about = "Writes random data to specified paths")]
@@ -105,7 +105,7 @@ struct Target {
     path: PathBuf,
     fh: File,
     size: u64,
-    rng: ChaCha12Rng,
+    rng: ChaCha8Rng,
 }
 
 fn main() -> Result<()> {
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
         .map(|path| {
             let fh = open(&path)?;
             let size = freespace(&path)?;
-            let rng = ChaCha12Rng::try_from_rng(&mut rand::rngs::SysRng)
+            let rng = ChaCha8Rng::try_from_rng(&mut rand::rngs::SysRng)
                 .context("failed to seed RNG from OS")?;
             Ok(Target {
                 path,
