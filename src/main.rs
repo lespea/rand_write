@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, ErrorKind, IsTerminal, Write};
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::sync_channel;
 use std::thread::scope;
@@ -30,22 +30,6 @@ struct Opt {
     /// Devices to overwrite entirely, or files to fill their filesystem's free space with
     #[arg(required = true)]
     paths: Vec<PathBuf>,
-}
-
-fn is_yes(answer: &str) -> bool {
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-fn confirm() -> Result<bool> {
-    let stdin = std::io::stdin();
-    if !stdin.is_terminal() {
-        bail!("no terminal to confirm on; pass --yes to wipe anyway");
-    }
-    print!("Continue? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    stdin.lock().read_line(&mut answer)?;
-    Ok(is_yes(&answer))
 }
 
 fn to_dur(start: Instant) -> FormattedDuration {
@@ -132,7 +116,14 @@ fn main() -> Result<()> {
                 ),
             }
         }
-        if !confirm()? {
+        // Enter is required, so a stray keypress can't confirm
+        let go = dialoguer::Confirm::new()
+            .with_prompt("Continue?")
+            .default(false)
+            .wait_for_newline(true)
+            .interact()
+            .context("couldn't ask for confirmation; pass --yes to wipe without asking")?;
+        if !go {
             bail!("aborted");
         }
     }
@@ -347,15 +338,5 @@ mod tests {
     fn file_writes_are_always_full_buffers() {
         assert_eq!(chunk_len(false, 0), BUF_SIZE);
         assert_eq!(chunk_len(false, 512), BUF_SIZE);
-    }
-
-    #[test]
-    fn only_yes_confirms() {
-        for yes in ["y", "Y", "yes", " YES \n"] {
-            assert!(is_yes(yes), "{yes:?}");
-        }
-        for no in ["", "\n", "n", "no", "yep", "maybe"] {
-            assert!(!is_yes(no), "{no:?}");
-        }
     }
 }
