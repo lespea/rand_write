@@ -10,7 +10,7 @@ use clap::Parser;
 use humantime::{FormattedDuration, format_duration};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use rand::prelude::*;
-use rand_chacha::ChaCha8Rng;
+use chacha20::ChaCha8Rng;
 
 mod platform;
 
